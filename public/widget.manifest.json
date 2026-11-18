@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "mcp-chat",
+  "packageId": "com.techies.widget.mcp-chat",
+  "name": "MCPチャット (ZTA A2A)",
+  "englishName": "MCP Chat Client",
+  "version": "3.1.0",
+  "description": "ZTA OAuth JWT + SSE 経由で社内データ (DB・業務システム・ナレッジ等) を横断分析し、インタラクティブHTMLダッシュボードやレポートを生成する独立型 MCP チャットクライアントプラグイン。",
+  "author": "Techies Inc.",
+  "repository": "Techies-T/ea-widget-mcp-chat",
+  "category": "ai_agent",
+  "deploymentType": "container",
+  "entrypoints": {
+    "main": "/index.html"
+  },
+  "providesCapabilities": [
+    "capability:mcp-chat"
+  ],
+  "consumesCapabilities": [
+    "capability:knowledge-store"
+  ],
+  "requiresHostCapabilities": [
+    "host:mcp-tools",
+    "host:ai-config",
+    "host:knowledge"
+  ],
+  "permissions": {
+    "legacyWidgetId": "app:mcp-chat",
+    "actions": []
+  },
+  "defaultWindow": {
+    "width": 980,
+    "height": 720,
+    "title": "MCP Chat Client"
+  }
+}
