@@ -337,7 +337,7 @@ async function executeMcpWorkflow({ user, message, previous_interaction_id, envi
         throw new Error('Gemini API Key または Claude API Key が設定されていません。System Settings で設定してください。');
     }
 
-    const globalGeminiModel = cfg.globalGeminiModel || 'gemini-3.6-flash';
+    const globalGeminiModel = cfg.globalGeminiModel || 'gemini-3.8-flash';
     const globalClaudeModel = cfg.globalClaudeModel || 'claude-sonnet-4-6';
     const configuredMcpModel = cfg.configuredMcpModel || '';
     const configuredClaudeMcpModel = cfg.configuredClaudeMcpModel || '';
