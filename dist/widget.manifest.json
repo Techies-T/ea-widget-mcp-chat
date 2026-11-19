@@ -4,7 +4,7 @@
   "packageId": "com.techies.widget.mcp-chat",
   "name": "MCPチャット (ZTA A2A)",
   "englishName": "MCP Chat Client",
-  "version": "3.1.0",
+  "version": "1.0.0",
   "description": "ZTA OAuth JWT + SSE 経由で社内データ (DB・業務システム・ナレッジ等) を横断分析し、インタラクティブHTMLダッシュボードやレポートを生成する独立型 MCP チャットクライアントプラグイン。",
   "author": "Techies Inc.",
   "repository": "Techies-T/ea-widget-mcp-chat",
