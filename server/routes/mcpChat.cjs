@@ -429,6 +429,7 @@ ${toolDescriptions}`;
 
     const client = getGeminiClient(apiKey);
     const modelLower = (modelName || '').toLowerCase();
+    const msgLower = String(message || '').toLowerCase();
     const MAX_OUTPUT_TOKENS = (modelLower.includes('argon') || modelLower.includes('carbon')) ? 32768 : 65536;
 
     let currentInteractionId = previous_interaction_id;
