@@ -26,7 +26,7 @@ const HtmlPreviewCodeBlock = ({ code, onSaveToKnowledge, onOpen }) => {
     }, [viewMode, code, isExpanded]);
 
     const openInNewTab = () => {
-        const blob = new Blob([code], { type: 'text/html' });
+        const blob = new Blob([preparedCode || code], { type: 'text/html;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         window.open(url, '_blank');
     };
