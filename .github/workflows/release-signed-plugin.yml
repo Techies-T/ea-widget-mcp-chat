@@ -16,6 +16,9 @@ permissions:
 jobs:
   build-scan-sign-push:
     runs-on: ubuntu-latest
+    env:
+      HAS_AWS_KMS_ROLE: ${{ secrets.AWS_KMS_SIGNER_ROLE_ARN != '' }}
+      HAS_PQC_SIGN_SECRETS: ${{ secrets.AWS_KMS_SIGNER_ROLE_ARN != '' && secrets.AWS_KMS_MLDSA65_KEY_ID != '' && secrets.EA_PLUGIN_PROD_ED25519_PRIVATE_KEY != '' }}
     steps:
       - name: Checkout Widget Repository
         uses: actions/checkout@v4
@@ -35,14 +38,14 @@ jobs:
         run: npm run build
 
       - name: Configure AWS Credentials via GitHub OIDC (Zero Static Keys)
-        if: ${{ secrets.AWS_KMS_SIGNER_ROLE_ARN != '' }}
+        if: env.HAS_AWS_KMS_ROLE == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_KMS_SIGNER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
 
       - name: Sign Manifest & Bundle with PQC Hybrid (Ed25519 + AWS KMS ML-DSA-65)
-        if: ${{ secrets.AWS_KMS_SIGNER_ROLE_ARN != '' && secrets.AWS_KMS_MLDSA65_KEY_ID != '' && secrets.EA_PLUGIN_PROD_ED25519_PRIVATE_KEY != '' }}
+        if: env.HAS_PQC_SIGN_SECRETS == 'true'
         env:
           AWS_KMS_MLDSA65_KEY_ID: ${{ secrets.AWS_KMS_MLDSA65_KEY_ID }}
           EA_PLUGIN_PROD_ED25519_PRIVATE_KEY: ${{ secrets.EA_PLUGIN_PROD_ED25519_PRIVATE_KEY }}
