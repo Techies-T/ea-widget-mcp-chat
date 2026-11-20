@@ -22,6 +22,165 @@ function extractUsageTokens(usageObj) {
     return { input, output, thought };
 }
 
+// ==========================================
+// Aurora / RDS (IAM 認証) & AWS公式 MySQL MCP ツール正規化・ハンドリング補助
+// ==========================================
+const SCHEMA_AND_META_TOOLS = new Set([
+    'list_tables',
+    'describe_table',
+    'get_table_schema',
+    'check_connection_status',
+    'list_databases',
+    'show_tables',
+    'list_catalog',
+    'get_catalog_detail'
+]);
+
+const QUERY_EXECUTION_TOOLS = new Set([
+    'execute_query',
+    'run_query',
+    'read_query'
+]);
+
+const TABLE_SCHEMA_TOOLS = new Set([
+    'describe_table',
+    'get_table_schema'
+]);
+
+/**
+ * サーバープレフィックス付きツール名（例: aurora_rds__list_tables / aurora-rds:execute_query）から
+ * ベースとなるツール名を正規化抽出する
+ */
+function normalizeToolBaseName(toolName) {
+    if (!toolName || typeof toolName !== 'string') return '';
+    const trimmed = toolName.trim().toLowerCase();
+    const parts = trimmed.split(/(?:__|[:./])/);
+    return parts[parts.length - 1] || trimmed;
+}
+
+function isSchemaOrMetaTool(toolName) {
+    return SCHEMA_AND_META_TOOLS.has(normalizeToolBaseName(toolName));
+}
+
+/**
+ * aurora-rds-mcp / awslabs.mysql-mcp-server 間の引数名揺れ（query/sql/statement, table_name/table/tableName 等）を
+ * ツールの JSON Schema 定義に合わせて安全に正規化する
+ */
+function normalizeToolArguments(funcName, rawArgs, mcpTools = []) {
+    const args = (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) ? { ...rawArgs } : {};
+    const baseName = normalizeToolBaseName(funcName);
+    const toolDef = Array.isArray(mcpTools) ? mcpTools.find(t => t && t.name === funcName) : null;
+    const schemaProps = toolDef?.parameters?.properties || toolDef?.inputSchema?.properties || {};
+    const propKeys = Object.keys(schemaProps);
+
+    if (QUERY_EXECUTION_TOOLS.has(baseName)) {
+        const sqlValue = args.query ?? args.sql ?? args.statement;
+        if (typeof sqlValue === 'string' && sqlValue.trim()) {
+            if (propKeys.includes('query') && !args.query) {
+                args.query = sqlValue;
+            } else if (propKeys.includes('sql') && !args.sql) {
+                args.sql = sqlValue;
+            } else if (propKeys.includes('statement') && !args.statement) {
+                args.statement = sqlValue;
+            }
+        }
+    }
+
+    if (TABLE_SCHEMA_TOOLS.has(baseName)) {
+        const tableVal = args.table_name ?? args.tableName ?? args.table;
+        if (typeof tableVal === 'string' && tableVal.trim()) {
+            if (propKeys.includes('table_name') && !args.table_name) {
+                args.table_name = tableVal;
+            } else if (propKeys.includes('tableName') && !args.tableName) {
+                args.tableName = tableVal;
+            } else if (propKeys.includes('table') && !args.table) {
+                args.table = tableVal;
+            }
+        }
+    }
+
+    return args;
+}
+
+/**
+ * ログおよび合成フェーズ用にツール引数を可読フォーマットする
+ */
+function formatToolArgsSummary(args) {
+    if (!args || typeof args !== 'object') return '{}';
+    const sql = args.query || args.sql || args.statement;
+    if (sql) return String(sql);
+    const table = args.table_name || args.tableName || args.table;
+    if (table) {
+        const dbName = args.database || args.schema || args.database_name;
+        return dbName ? `table=${dbName}.${table}` : `table=${table}`;
+    }
+    return JSON.stringify(args);
+}
+
+/**
+ * 実行中のツール名に応じた分かりやすい進捗メッセージを生成する
+ */
+function buildToolProgressMessage(functionCalls = []) {
+    const names = functionCalls.map(c => c.name).filter(Boolean);
+    const baseNames = names.map(normalizeToolBaseName);
+    if (baseNames.includes('check_connection_status')) {
+        return `🛡️ Aurora/RDS IAM 接続ステータスを確認中（${names.join(', ')}）...`;
+    }
+    if (baseNames.some(n => ['list_tables', 'describe_table', 'get_table_schema', 'list_databases', 'show_tables'].includes(n))) {
+        return `🔍 データベースのテーブル一覧・スキーマ構造を照会中（${names.join(', ')}）...`;
+    }
+    if (baseNames.some(n => QUERY_EXECUTION_TOOLS.has(n))) {
+        return `📊 データベースクエリを実行中（${names.join(', ')}）...`;
+    }
+    return `MCPツール「${names.join(', ')}」を実行中...`;
+}
+
+/**
+ * メタデータ内の接続サーバーから Aurora/RDS (IAM 認証) サーバーを検出・要約する
+ */
+function extractAuroraRdsMetaSummary(servers = []) {
+    if (!Array.isArray(servers)) return { connected: false, servers: [] };
+    const matched = servers.filter((s) => {
+        if (!s || typeof s !== 'object') return false;
+        if (Boolean(s.is_aurora_rds) || Boolean(s.aurora_rds_meta)) return true;
+        const text = `${s.id || ''} ${s.name || ''} ${s.domain || ''} ${s.domain_key || ''} ${s.category || ''} ${s.url || ''} ${s.endpoint || ''} ${s.endpoint_url || ''}`.toLowerCase();
+        const authMode = String(s.aurora_rds_meta?.auth_mode || s.authMode || s.dbAuthMode || '').toLowerCase();
+        const toolBaseNames = Array.isArray(s.tools) ? s.tools.map(t => normalizeToolBaseName(typeof t === 'string' ? t : t?.name)) : [];
+        return (
+            text.includes('aurora') ||
+            text.includes('rds') ||
+            text.includes('awslabs') ||
+            text.includes('mysql-mcp') ||
+            ['iam', 'awslabs_mysql', 'sandbox_sim'].includes(authMode) ||
+            toolBaseNames.includes('check_connection_status') ||
+            (toolBaseNames.includes('get_table_schema') && toolBaseNames.includes('run_query'))
+        );
+    });
+
+    return {
+        connected: matched.length > 0,
+        count: matched.length,
+        servers: matched.map((s) => {
+            const toolBaseNames = Array.isArray(s.tools) ? s.tools.map(t => normalizeToolBaseName(typeof t === 'string' ? t : t?.name)) : [];
+            const hasWriteTool = toolBaseNames.some(n => ['write_query', 'execute_write', 'mutate_query'].includes(n));
+            const readOnly = s.aurora_rds_meta?.read_only !== undefined
+                ? Boolean(s.aurora_rds_meta.read_only)
+                : (s.readOnly !== undefined
+                    ? Boolean(s.readOnly)
+                    : (s.operation_level === 'read_only' || !hasWriteTool));
+            return {
+                id: s.id,
+                name: s.name,
+                domain: s.domain || s.domain_key || null,
+                authMode: s.aurora_rds_meta?.auth_mode || s.authMode || s.dbAuthMode || 'iam',
+                readOnly,
+                engine: s.aurora_rds_meta?.engine || null,
+                awsRegion: s.aurora_rds_meta?.aws_region || null
+            };
+        })
+    };
+}
+
 // 経過時間に応じた詳細進捗メッセージの定義（ユーザーに現在の内部処理フェーズを明示）
 const PROGRESS_STAGES = {
     initial: [
@@ -246,6 +405,13 @@ Multiple MCP servers are connected across different domains. Always select the e
 4. **Meta-Catalog MCP (データカタログ・GenUIメタ情報)**:
    - Tools: \`list_catalog\`, \`get_catalog_detail\`
    - Use to inspect enterprise data schemas and recommended GenUI dashboard specifications.
+5. **AWS Aurora (MySQL互換) / RDS (MariaDB・MySQL) IAM 認証 MCP (Aurora/RDS データベース分析)**:
+   - Supported MCP servers: \`aurora-rds-mcp\` (\`list_tables\`, \`describe_table\`, \`execute_query\`, \`check_connection_status\`) and AWS official \`awslabs.mysql-mcp-server\` (\`list_tables\`, \`get_table_schema\`, \`run_query\`, etc.).
+   - Whenever the user asks about **Aurora**, **RDS**, **IAM 認証DB**, **接続ステータス**, or general database tables/schemas/summaries outside NPB baseball:
+     - First check connection/IAM status with \`check_connection_status\` if asked about connection health, IAM token expiry, or Read-Only mode.
+     - Always inspect actual tables first via \`list_tables\`, and inspect table columns via \`describe_table\` or \`get_table_schema\` (whichever is available in your tool list). NEVER guess table or column names.
+     - Run analytical queries using \`execute_query\` or \`run_query\` (or \`read_query\` if provided). Under ZTA Read-Only protection, ONLY execute \`SELECT\`, \`SHOW\`, \`DESCRIBE\`, or \`EXPLAIN\` statements—never attempt \`INSERT\`, \`UPDATE\`, \`DELETE\`, \`DROP\`, \`ALTER\`, or \`TRUNCATE\`.
+     - When asked to dashboard table row counts or summaries, gather real counts/aggregates via SQL queries and then generate a complete, interactive HTML dashboard (\`\`\`html ... \`\`\`) with KPI cards, Chart.js visualizations, and a searchable/sortable table.
 
 CRITICAL TOOL ARGUMENT SYNTAX (ABSOLUTE MANDATORY):
 When calling any tool with arguments (especially SQL queries or multi-line strings):
@@ -395,9 +561,10 @@ ${toolDescriptions}`;
     let maxTurns = (!isNaN(maxTurnsSetting) && maxTurnsSetting > 0) ? maxTurnsSetting : 15;
 
     const callMcpTool = async (funcName, funcArgs, _allowedWidgets, _userObj, _reqObj, userMessage) => {
+        const normalizedArgs = normalizeToolArguments(funcName, funcArgs, mcpTools);
         return coreClient.callMcpToolViaCore(agentToken, {
             funcName,
-            funcArgs,
+            funcArgs: normalizedArgs,
             userMessage: userMessage || message
         }, hostUrl);
     };
@@ -505,17 +672,16 @@ ${toolDescriptions}`;
 
             if (functionCalls.length > 0) {
                 const functionResponses = [];
-                const toolNames = functionCalls.map(c => c.name).join(', ');
-                if (onProgress) onProgress(`MCPツール「${toolNames}」を実行中...`, turnCount);
+                if (onProgress) onProgress(buildToolProgressMessage(functionCalls), turnCount);
                 
                 for (const call of functionCalls) {
                     const funcName = call.name;
-                    const funcArgs = call.arguments || {};
+                    const funcArgs = normalizeToolArguments(funcName, call.arguments || {}, mcpTools);
                     const funcId = call.id;
                     
                     console.log(`[MCP Chat] Executing tool: ${funcName}`, funcArgs);
-                    if (funcArgs && (funcArgs.query || funcArgs.sql)) {
-                        console.log(`[MCP AI Query] 🤖 AI発行クエリ [${funcName}]:\n${funcArgs.query || funcArgs.sql}`);
+                    if (funcArgs && (funcArgs.query || funcArgs.sql || funcArgs.statement)) {
+                        console.log(`[MCP AI Query] 🤖 AI発行クエリ [${funcName}]:\n${funcArgs.query || funcArgs.sql || funcArgs.statement}`);
                     }
                     
                     try {
@@ -551,10 +717,10 @@ ${toolDescriptions}`;
                 // Deep-reasoning モデル (Argon / Carbon 等) が必要な全テーブルの実データ取得クエリを完了した場合、
                 // 非ストリーミングの interactions.create で180秒タイムアウトするのを防ぎ、
                 // 即座にストリーミング＋途中再開（Auto-Resume）対応のダッシュボード合成へ移行する
-                const dataQueryCount = artifacts.filter(a => !['list_tables', 'describe_table'].includes(a.tool)).length;
+                const dataQueryCount = artifacts.filter(a => !isSchemaOrMetaTool(a.tool)).length;
                 const isDeepReasoningModel = modelLower.includes('argon') || modelLower.includes('carbon');
                 const requiredTables = ['batting_stats', 'pitching_stats', 'games', 'team_standings'].filter(tbl => msgLower.includes(tbl));
-                const queriedSqlText = artifacts.map(a => String(a.args?.query || a.args?.sql || '')).join(' ').toLowerCase();
+                const queriedSqlText = artifacts.map(a => String(a.args?.query || a.args?.sql || a.args?.statement || '')).join(' ').toLowerCase();
                 const hasAllRequiredTables = requiredTables.every(tbl => queriedSqlText.includes(tbl));
 
                 if (isDeepReasoningModel && hasAllRequiredTables && ((turnCount >= 2 && dataQueryCount >= 3) || dataQueryCount >= 4)) {
@@ -617,7 +783,7 @@ ${toolDescriptions}`;
         if (onProgress) onProgress('取得データを元にHTML/SVGダッシュボードをストリーミング構築中...', turnCount + 1);
         try {
             const artifactsContext = artifacts.map((a, idx) => {
-                const queryInfo = a.args?.query || a.args?.sql || JSON.stringify(a.args);
+                const queryInfo = formatToolArgsSummary(a.args);
                 const resultStr = typeof a.result === 'string' ? a.result : JSON.stringify(a.result);
                 return `### クエリ ${idx + 1} (${a.tool})\n実行SQL/パラメータ: ${queryInfo}\n取得データ:\n${resultStr.substring(0, 15000)}`;
             }).join('\n\n');
@@ -1006,8 +1172,10 @@ const getMetaHandler = async (req, res) => {
         const defaultMcpModel = (configuredMcpModel && claudeRunner.isClaudeModel(configuredMcpModel))
             ? configuredMcpModel
             : (mcpAiProvider === 'claude' ? (configuredClaudeMcpModel || globalClaudeModel) : (configuredMcpModel || globalGeminiModel));
+        const auroraRdsStatus = extractAuroraRdsMetaSummary(metadata?.servers);
         res.json({
             ...metadata,
+            auroraRdsStatus,
             userRole: req.user?.role || 'user',
             defaultModel: defaultMcpModel
         });

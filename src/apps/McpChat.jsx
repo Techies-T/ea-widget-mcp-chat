@@ -7,6 +7,61 @@ import 'katex/dist/katex.min.css';
 import SaveToKnowledgeModal from '../components/SaveToKnowledgeModal';
 import HtmlPreviewCodeBlock from '../components/HtmlPreviewCodeBlock';
 
+const AURORA_RDS_QUICK_PROMPTS = [
+    {
+        label: '🛡️ Aurora/RDS テーブル＆スキーマ確認',
+        prompt: '接続中の Aurora/RDS のテーブル一覧とスキーマを確認して、各テーブルの役割と主要カラム構成を整理してください。',
+        category: 'aurora-rds'
+    },
+    {
+        label: '📊 Aurora/RDS サマリーダッシュボード',
+        prompt: '接続中の Aurora/RDS の主要テーブルのレコード件数とサマリーを集計し、インタラクティブなHTMLダッシュボード化してください。',
+        category: 'aurora-rds'
+    },
+    {
+        label: '🔐 Aurora/RDS IAM 接続ステータス',
+        prompt: '接続中の Aurora/RDS の接続ステータス（エンジン種別・IAM認証状態・トークン残り有効期限・Read-Only保護状態）を確認してください。',
+        category: 'aurora-rds'
+    }
+];
+
+const normalizeToolName = (name) => {
+    if (!name || typeof name !== 'string') return '';
+    const parts = name.trim().toLowerCase().split(/(?:__|[:./])/);
+    return parts[parts.length - 1] || name.trim().toLowerCase();
+};
+
+const isAuroraRdsServer = (server) => {
+    if (!server || typeof server !== 'object') return false;
+    if (Boolean(server.is_aurora_rds) || Boolean(server.aurora_rds_meta)) return true;
+    const text = `${server.id || ''} ${server.name || ''} ${server.domain || ''} ${server.domain_key || ''} ${server.category || ''} ${server.url || ''} ${server.endpoint || ''} ${server.endpoint_url || ''}`.toLowerCase();
+    const authMode = String(server.aurora_rds_meta?.auth_mode || server.authMode || server.dbAuthMode || '').toLowerCase();
+    const toolNames = Array.isArray(server.tools)
+        ? server.tools.map((t) => normalizeToolName(typeof t === 'string' ? t : t?.name))
+        : [];
+    return (
+        text.includes('aurora') ||
+        text.includes('rds') ||
+        text.includes('awslabs') ||
+        text.includes('mysql-mcp') ||
+        ['iam', 'awslabs_mysql', 'sandbox_sim'].includes(authMode) ||
+        toolNames.includes('check_connection_status') ||
+        (toolNames.includes('get_table_schema') && toolNames.includes('run_query'))
+    );
+};
+
+const isServerReadOnly = (server) => {
+    if (!server || typeof server !== 'object') return true;
+    if (server.aurora_rds_meta?.read_only !== undefined) return Boolean(server.aurora_rds_meta.read_only);
+    if (server.readOnly !== undefined) return Boolean(server.readOnly);
+    if (server.operation_level === 'read_only') return true;
+    if (server.operation_level && server.operation_level !== 'read_only') return false;
+    const toolNames = Array.isArray(server.tools)
+        ? server.tools.map((t) => normalizeToolName(typeof t === 'string' ? t : t?.name))
+        : [];
+    return !toolNames.some((n) => ['write_query', 'execute_write', 'mutate_query'].includes(n));
+};
+
 const renderContextUsage = (usage) => {
     if (!usage) return null;
     const promptTokens = usage.promptTokenCount ?? usage.prompt_token_count ?? usage.prompt_tokens ?? usage.input_tokens ?? usage.prompt_eval_count ?? 0;
@@ -346,9 +401,63 @@ const McpChat = ({ onOpen, capabilities = [], initialBriefingReport = null }) =>
     const [copiedId, setCopiedId] = useState(null);
 
     // MCP Meta Information & Dynamic Pipeline State
-    const [metaData, setMetaData] = useState(null); // { servers, totalServers, totalTools, userRole }
+    const [metaData, setMetaData] = useState(null); // { servers, totalServers, totalTools, userRole, auroraRdsStatus }
     const [selectedDomain, setSelectedDomain] = useState('auto'); // 'auto' | domain id
     const [isLoadingMeta, setIsLoadingMeta] = useState(false);
+
+    // Aurora / RDS (IAM 認証) 接続状態の導出
+    const auroraRdsInfo = useMemo(() => {
+        const servers = Array.isArray(metaData?.servers) ? metaData.servers : [];
+        const matchedServers = servers.filter(isAuroraRdsServer);
+        const backendStatus = metaData?.auroraRdsStatus;
+        const connected = matchedServers.length > 0 || Boolean(backendStatus?.connected);
+        const effectiveList = matchedServers.length > 0
+            ? matchedServers
+            : (Array.isArray(backendStatus?.servers) ? backendStatus.servers : []);
+        const allReadOnly = effectiveList.length > 0 ? effectiveList.every(isServerReadOnly) : true;
+        const primaryDomain = matchedServers[0]?.domain || matchedServers[0]?.domain_key || backendStatus?.servers?.[0]?.domain || null;
+        const rawAuthMode = String(
+            effectiveList[0]?.aurora_rds_meta?.auth_mode ||
+            effectiveList[0]?.authMode ||
+            effectiveList[0]?.dbAuthMode ||
+            'iam'
+        ).toLowerCase();
+        const authModeLabel = rawAuthMode === 'awslabs_mysql'
+            ? 'AWS公式MCP (IAM)'
+            : (rawAuthMode === 'sandbox_sim' ? 'IAM Simulation' : 'SigV4 IAM + TLS');
+        const engine = effectiveList[0]?.aurora_rds_meta?.engine || effectiveList[0]?.engine || null;
+        const awsRegion = effectiveList[0]?.aurora_rds_meta?.aws_region || effectiveList[0]?.awsRegion || null;
+        const serverNames = effectiveList.map((s) => s.name || s.id).filter(Boolean);
+        return {
+            connected,
+            servers: effectiveList,
+            isReadOnly: allReadOnly,
+            primaryDomain,
+            authModeLabel,
+            engine,
+            awsRegion,
+            serverNames
+        };
+    }, [metaData]);
+
+    // 既存クイックプロンプトと Aurora / RDS 向け分析クイックプロンプトを統合
+    const mergedQuickPrompts = useMemo(() => {
+        const base = Array.isArray(quickPrompts) ? quickPrompts : [];
+        const existingLabels = new Set(base.map((p) => p?.label).filter(Boolean));
+        const auroraExtras = AURORA_RDS_QUICK_PROMPTS.filter((p) => !existingLabels.has(p.label));
+        return auroraRdsInfo.connected ? [...auroraExtras, ...base] : [...base, ...auroraExtras];
+    }, [quickPrompts, auroraRdsInfo.connected]);
+
+    const handleSelectQuickPrompt = useCallback((item) => {
+        if (!item?.prompt) return;
+        setInput(item.prompt);
+        if (item.category === 'aurora-rds' && auroraRdsInfo.primaryDomain) {
+            setSelectedDomain(auroraRdsInfo.primaryDomain);
+        }
+        if (inputRef.current) {
+            inputRef.current.focus();
+        }
+    }, [auroraRdsInfo.primaryDomain]);
 
     // Save to Knowledge Modal State
     const [saveKnowledgeModalOpen, setSaveKnowledgeModalOpen] = useState(false);
@@ -706,19 +815,34 @@ const McpChat = ({ onOpen, capabilities = [], initialBriefingReport = null }) =>
             <div className={`flex flex-col h-full min-h-0 border-r border-gray-200 transition-all duration-300 ${activeArtifact ? 'w-1/2' : 'w-full border-r-0'}`}>
                 
                 {/* Header */}
-                <div className="flex-none h-14 border-b border-gray-200 bg-white flex items-center px-6 justify-between shadow-sm z-10">
-                    <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600">
+                <div className="flex-none min-h-14 py-2 border-b border-gray-200 bg-white flex flex-wrap items-center px-6 justify-between gap-2 shadow-sm z-10">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center text-indigo-600 flex-shrink-0">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
                                 <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z" clipRule="evenodd" />
                             </svg>
                         </div>
-                        <h1 className="font-semibold text-gray-800">MCP Client</h1>
-                        <span className="text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-100 ml-2">Beta</span>
+                        <h1 className="font-semibold text-gray-800 whitespace-nowrap">MCP Client</h1>
+                        <span className="text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full border border-indigo-100">v1.1.0</span>
                         {metaData && (
-                            <div className="flex items-center gap-1.5 ml-3 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-medium shadow-2xs" title="ZTA-MCP-GATEWAY より取得した最新メタ情報">
+                            <div className="flex items-center gap-1.5 ml-1 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-medium shadow-2xs whitespace-nowrap" title="ZTA-MCP-GATEWAY より取得した最新メタ情報">
                                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                                 <span>ZTA Gateway: {metaData.totalServers}サーバー / {metaData.totalTools}ツール接続中</span>
+                            </div>
+                        )}
+                        {auroraRdsInfo.connected && (
+                            <div
+                                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-gradient-to-r from-teal-50 to-emerald-50 border border-teal-300 text-teal-800 text-[11px] font-semibold shadow-2xs whitespace-nowrap"
+                                title={`接続サーバー: ${auroraRdsInfo.serverNames.join(', ') || 'aurora-rds-mcp'}${auroraRdsInfo.engine ? `\nエンジン: ${auroraRdsInfo.engine}` : ''}${auroraRdsInfo.awsRegion ? ` (${auroraRdsInfo.awsRegion})` : ''}\n認証方式: ${auroraRdsInfo.authModeLabel}\nアクセス権限: ${auroraRdsInfo.isReadOnly ? 'Read-Only (変更系SQLブロック)' : 'Read/Write'}`}
+                            >
+                                <span>🛡️ Aurora/RDS IAM 保護</span>
+                                <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono border ${
+                                    auroraRdsInfo.isReadOnly
+                                        ? 'bg-white/90 text-emerald-700 border-emerald-300'
+                                        : 'bg-amber-50 text-amber-800 border-amber-300'
+                                }`}>
+                                    {auroraRdsInfo.isReadOnly ? '🔒 Read-Only' : '✍️ Read/Write'}
+                                </span>
                             </div>
                         )}
                     </div>
@@ -765,15 +889,27 @@ const McpChat = ({ onOpen, capabilities = [], initialBriefingReport = null }) =>
                                 </svg>
                             </div>
                             <h2 className="text-xl font-semibold text-gray-800 mb-2">MCP Agent</h2>
-                            <p className="text-sm text-gray-500 mb-8">
+                            <p className="text-sm text-gray-500 mb-5">
                                 Connect to any external tools using Model Context Protocol. Ask me to monitor your servers, fetch data, or interact with external systems.
                             </p>
+                            {auroraRdsInfo.connected && (
+                                <div className="mb-5 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-teal-50/80 border border-teal-200 text-teal-800 text-xs font-medium shadow-2xs">
+                                    <span>🛡️ Aurora/RDS IAM 保護が有効です</span>
+                                    <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-white border border-teal-200 text-teal-700">
+                                        {auroraRdsInfo.authModeLabel} / {auroraRdsInfo.isReadOnly ? 'Read-Only' : 'Read/Write'}
+                                    </span>
+                                </div>
+                            )}
                             <div className="flex flex-wrap gap-2 justify-center">
-                                {quickPrompts.map((item, idx) => (
+                                {mergedQuickPrompts.map((item, idx) => (
                                     <button 
                                         key={idx}
-                                        onClick={() => setInput(item.prompt)} 
-                                        className="bg-white border border-gray-200 text-gray-600 text-xs px-3 py-1.5 rounded-full hover:bg-gray-50 hover:border-gray-300 transition-colors shadow-sm"
+                                        onClick={() => handleSelectQuickPrompt(item)} 
+                                        className={`text-xs px-3 py-1.5 rounded-full transition-colors shadow-sm border ${
+                                            item.category === 'aurora-rds'
+                                                ? 'bg-teal-50/70 border-teal-200 text-teal-800 hover:bg-teal-100/80 hover:border-teal-300 font-medium'
+                                                : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300'
+                                        }`}
                                     >
                                         {item.label}
                                     </button>
@@ -864,40 +1000,56 @@ const McpChat = ({ onOpen, capabilities = [], initialBriefingReport = null }) =>
                                 >
                                     <span>⚡ 自動判定 (Auto)</span>
                                 </button>
-                                {metaData.servers.map((s) => (
-                                    <button
-                                        key={s.id}
-                                        type="button"
-                                        onClick={() => setSelectedDomain(s.domain === selectedDomain ? 'auto' : s.domain)}
-                                        className={`flex-shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all flex items-center gap-1.5 border ${
-                                            selectedDomain === s.domain
-                                                ? 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-300 shadow-xs font-semibold'
-                                                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-                                        }`}
-                                        title={`サーバー: ${s.name}\nツール: ${s.tools.map(t => t.name).join(', ')}`}
-                                    >
-                                        <span>{s.icon}</span>
-                                        <span>{s.category}</span>
-                                        <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                                            selectedDomain === s.domain ? 'bg-indigo-200 text-indigo-800' : 'bg-gray-100 text-gray-500'
-                                        }`}>
-                                            {s.toolCount}
-                                        </span>
-                                    </button>
-                                ))}
+                                {metaData.servers.map((s) => {
+                                    const isAurora = isAuroraRdsServer(s);
+                                    const isRo = isServerReadOnly(s);
+                                    return (
+                                        <button
+                                            key={s.id}
+                                            type="button"
+                                            onClick={() => setSelectedDomain(s.domain === selectedDomain ? 'auto' : s.domain)}
+                                            className={`flex-shrink-0 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all flex items-center gap-1.5 border ${
+                                                selectedDomain === s.domain
+                                                    ? (isAurora
+                                                        ? 'bg-teal-50 text-teal-800 border-teal-400 ring-1 ring-teal-300 shadow-xs font-semibold'
+                                                        : 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-300 shadow-xs font-semibold')
+                                                    : (isAurora
+                                                        ? 'bg-teal-50/40 text-teal-800 border-teal-200 hover:bg-teal-50'
+                                                        : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50')
+                                            }`}
+                                            title={`サーバー: ${s.name}${isAurora ? `\n🛡️ Aurora/RDS IAM 保護 (${isRo ? 'Read-Only' : 'Read/Write'})` : ''}\nツール: ${(s.tools || []).map(t => t.name || t).join(', ')}`}
+                                        >
+                                            <span>{s.icon || (isAurora ? '🛡️' : '🔌')}</span>
+                                            <span>{s.category || s.name}</span>
+                                            {isAurora && (
+                                                <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-teal-100 text-teal-800 border border-teal-300 font-semibold">
+                                                    IAM{isRo ? '・RO' : ''}
+                                                </span>
+                                            )}
+                                            <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                                                selectedDomain === s.domain
+                                                    ? (isAurora ? 'bg-teal-200 text-teal-900' : 'bg-indigo-200 text-indigo-800')
+                                                    : 'bg-gray-100 text-gray-500'
+                                            }`}>
+                                                {s.toolCount}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
                             </div>
                         )}
 
                         <div className="flex gap-2 overflow-x-auto mb-3 pb-1 scrollbar-thin">
-                            <span className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold flex items-center mr-1">Quick Prompts</span>
-                            {quickPrompts.map((item, idx) => (
+                            <span className="text-[10px] text-gray-400 uppercase tracking-wider font-semibold flex items-center mr-1 flex-shrink-0">Quick Prompts</span>
+                            {mergedQuickPrompts.map((item, idx) => (
                                 <button 
                                     key={idx}
-                                    onClick={() => {
-                                        setInput(item.prompt);
-                                        if (inputRef.current) inputRef.current.focus();
-                                    }} 
-                                    className="flex-shrink-0 bg-white border border-gray-200 text-gray-600 text-[11px] px-2.5 py-1 rounded-full hover:bg-gray-50 hover:border-gray-300 transition-colors"
+                                    onClick={() => handleSelectQuickPrompt(item)} 
+                                    className={`flex-shrink-0 text-[11px] px-2.5 py-1 rounded-full transition-colors border ${
+                                        item.category === 'aurora-rds'
+                                            ? 'bg-teal-50/70 border-teal-200 text-teal-800 hover:bg-teal-100/80 hover:border-teal-300 font-medium'
+                                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300'
+                                    }`}
                                 >
                                     {item.label}
                                 </button>

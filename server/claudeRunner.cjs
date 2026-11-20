@@ -237,7 +237,7 @@ async function runClaudeMcpWorkflow({
     if (!finalResponseText && artifacts.length > 0) {
         if (onProgress) onProgress('ツール実行結果を元にダッシュボードと回答を合成中...', turnCount + 1);
         const artifactsContext = artifacts.map((a, idx) => {
-            const queryInfo = a.args?.query || a.args?.sql || JSON.stringify(a.args);
+            const queryInfo = a.args?.query || a.args?.sql || a.args?.statement || a.args?.table_name || a.args?.tableName || a.args?.table || JSON.stringify(a.args);
             const resultStr = typeof a.result === 'string' ? a.result : JSON.stringify(a.result);
             return `### クエリ ${idx + 1} (${a.tool})\n実行パラメータ: ${queryInfo}\n取得データ:\n${resultStr.substring(0, 15000)}`;
         }).join('\n\n');
