@@ -1,4 +1,7 @@
 node_modules
 .git
+.cache
 data
 *.tar.gz
+trivy-results.sarif
+container-image.json
