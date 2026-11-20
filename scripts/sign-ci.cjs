@@ -94,7 +94,7 @@ manifest.signatures = {
         }
     },
     githubProvenance: {
-        repository: process.env.GITHUB_REPOSITORY || 'Techies-T/ea-widget-virtual-office',
+        repository: process.env.GITHUB_REPOSITORY || 'Techies-T/ea-widget-mcp-chat',
         workflowRef: process.env.GITHUB_WORKFLOW_REF || '.github/workflows/release-signed-plugin.yml',
         commitSha: process.env.GITHUB_SHA || 'ci',
         attestationBundleUrl: null,
