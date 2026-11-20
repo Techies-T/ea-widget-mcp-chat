@@ -66,7 +66,7 @@ jobs:
 
       # Step 2: Vulnerability Scan (OS packages + Node.js dependencies)
       - name: Scan Container Image with Trivy (Block on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: 'ea-widget-mcp-chat:scan'
           format: 'table'
@@ -77,7 +77,7 @@ jobs:
 
       - name: Generate Trivy SARIF Report (HIGH & CRITICAL)
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: 'ea-widget-mcp-chat:scan'
           format: 'sarif'
